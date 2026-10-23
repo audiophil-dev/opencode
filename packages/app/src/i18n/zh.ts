@@ -1224,4 +1224,11 @@ export const dict = {
   "error.childStore.persistedProjectIconCreateFailed": "创建持久化项目图标失败",
   "error.childStore.storeCreateFailed": "创建存储失败",
   "terminal.connectionLost.abnormalClose": "WebSocket 异常关闭：{{code}}",
+  "filePreview.tooLarge": "This file is larger than {{size}} and cannot be previewed.",
+  "filePreview.resource.unavailable": "Image unavailable",
+  "filePreview.error": "This preview could not be rendered.",
+  "filePreview.error.viewSource": "View source",
+  "filePreview.mode.group": "File view",
+  "filePreview.mode.preview": "Preview",
+  "filePreview.mode.source": "Source",
 } satisfies Partial<Record<Keys, string>>

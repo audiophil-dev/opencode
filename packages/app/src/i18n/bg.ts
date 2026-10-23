@@ -1167,4 +1167,11 @@ export const dict = {
   "workspace.reset.archived.many": "{{count}} сесии ще бъдат архивирани.",
   "workspace.reset.note": "Това ще нулира работното пространство, за да съответства на клона по подразбиране.",
   "dialog.usageExceeded.dontShowAgain": "Не показвай отново",
+  "filePreview.tooLarge": "This file is larger than {{size}} and cannot be previewed.",
+  "filePreview.resource.unavailable": "Image unavailable",
+  "filePreview.error": "This preview could not be rendered.",
+  "filePreview.error.viewSource": "View source",
+  "filePreview.mode.group": "File view",
+  "filePreview.mode.preview": "Preview",
+  "filePreview.mode.source": "Source",
 }

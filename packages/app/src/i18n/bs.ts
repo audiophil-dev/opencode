@@ -1254,4 +1254,11 @@ export const dict = {
   "error.childStore.persistedProjectIconCreateFailed": "Nije uspjelo kreiranje trajne ikone projekta",
   "error.childStore.storeCreateFailed": "Nije uspjelo kreiranje skladišta",
   "terminal.connectionLost.abnormalClose": "WebSocket zatvoren nenormalno: {{code}}",
+  "filePreview.tooLarge": "This file is larger than {{size}} and cannot be previewed.",
+  "filePreview.resource.unavailable": "Image unavailable",
+  "filePreview.error": "This preview could not be rendered.",
+  "filePreview.error.viewSource": "View source",
+  "filePreview.mode.group": "File view",
+  "filePreview.mode.preview": "Preview",
+  "filePreview.mode.source": "Source",
 }

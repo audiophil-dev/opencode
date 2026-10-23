@@ -1161,4 +1161,11 @@ export const dict = {
   "workspace.reset.archived.many": "{{count}} сессия архив карда мешаванд.",
   "workspace.reset.note": "Ин фазои кориро барои мувофиқ кардани филиали пешфарз барқарор мекунад.",
   "dialog.usageExceeded.dontShowAgain": "Дигар нишон надиҳед",
+  "filePreview.tooLarge": "This file is larger than {{size}} and cannot be previewed.",
+  "filePreview.resource.unavailable": "Image unavailable",
+  "filePreview.error": "This preview could not be rendered.",
+  "filePreview.error.viewSource": "View source",
+  "filePreview.mode.group": "File view",
+  "filePreview.mode.preview": "Preview",
+  "filePreview.mode.source": "Source",
 }

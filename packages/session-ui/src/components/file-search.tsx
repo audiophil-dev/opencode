@@ -7,6 +7,9 @@ export function FileSearchBar(props: {
   query: () => string
   index: () => number
   count: () => number
+  // Presentation-only gate for the portaled bar; absent means visible. Hiding the bar
+  // never unmounts the find controller or clears its query.
+  visible?: () => boolean
   setInput: (el: HTMLInputElement) => void
   onInput: (value: string) => void
   onKeyDown: (event: KeyboardEvent) => void
@@ -23,6 +26,7 @@ export function FileSearchBar(props: {
         style={{
           top: `${props.pos().top}px`,
           right: `${props.pos().right}px`,
+          display: props.visible?.() === false ? "none" : undefined,
         }}
         onPointerDown={(e) => e.stopPropagation()}
       >

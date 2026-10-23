@@ -1168,4 +1168,11 @@ export const dict = {
   "workspace.reset.archived.many": "{{count}} sessies worden gearchiveerd.",
   "workspace.reset.note":
     "Hierdoor wordt de werkruimte opnieuw ingesteld zodat deze overeenkomt met de standaardbranch.",
+  "filePreview.tooLarge": "This file is larger than {{size}} and cannot be previewed.",
+  "filePreview.resource.unavailable": "Image unavailable",
+  "filePreview.error": "This preview could not be rendered.",
+  "filePreview.error.viewSource": "View source",
+  "filePreview.mode.group": "File view",
+  "filePreview.mode.preview": "Preview",
+  "filePreview.mode.source": "Source",
 }

@@ -1,7 +1,7 @@
 import type { FileContent } from "@opencode-ai/sdk/v2"
 
 const MAX_FILE_CONTENT_ENTRIES = 40
-const MAX_FILE_CONTENT_BYTES = 20 * 1024 * 1024
+export const MAX_FILE_CONTENT_BYTES = 20 * 1024 * 1024
 
 const lru = new Map<string, number>()
 let total = 0
@@ -39,6 +39,19 @@ function remove(path: string) {
 function reset() {
   lru.clear()
   total = 0
+}
+
+// Bounded resource loads admit only when the entry fits the remaining byte
+// budget without evicting anything else, and a new path needs a free entry slot
+// (a cached path may replace itself). Default loads skip this check and keep
+// their existing unconstrained behavior.
+export function canAdmitContentBytes(bytes: number) {
+  return bytes <= MAX_FILE_CONTENT_BYTES - total
+}
+
+export function canAdmitFileContent(path: string, bytes: number) {
+  if (!canAdmitContentBytes(bytes - (lru.get(path) ?? 0))) return false
+  return lru.has(path) ? lru.size <= MAX_FILE_CONTENT_ENTRIES : lru.size < MAX_FILE_CONTENT_ENTRIES
 }
 
 export function evictContentLru(keep: Set<string> | undefined, evict: (path: string) => void) {

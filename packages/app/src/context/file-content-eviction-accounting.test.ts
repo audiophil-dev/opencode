@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import {
+  canAdmitContentBytes,
+  canAdmitFileContent,
   evictContentLru,
   getFileContentBytesTotal,
   getFileContentEntryCount,
@@ -47,6 +49,27 @@ describe("file content eviction accounting", () => {
     expect(evicted).toEqual(["f-0"])
     expect(getFileContentEntryCount()).toBe(40)
     expect(getFileContentBytesTotal()).toBe(40)
+  })
+
+  test("admits only entries that fit the remaining byte budget", () => {
+    const chunk = 8 * 1024 * 1024
+    setFileContentBytes("a", chunk)
+    setFileContentBytes("b", chunk)
+
+    expect(canAdmitFileContent("c", 3 * 1024 * 1024)).toBe(true)
+    expect(canAdmitFileContent("c", 5 * 1024 * 1024)).toBe(false)
+    expect(canAdmitFileContent("a", chunk)).toBe(true)
+    expect(canAdmitContentBytes(3 * 1024 * 1024)).toBe(true)
+    expect(canAdmitContentBytes(chunk)).toBe(false)
+  })
+
+  test("entry cap denies new paths but allows cached replacement", () => {
+    for (let index = 0; index < 40; index += 1) setFileContentBytes(`e-${index}`, 1)
+
+    expect(getFileContentEntryCount()).toBe(40)
+    expect(canAdmitContentBytes(1)).toBe(true)
+    expect(canAdmitFileContent("e-0", 1)).toBe(true)
+    expect(canAdmitFileContent("new", 1)).toBe(false)
   })
 
   test("evicts by byte cap while preserving protected entries", () => {

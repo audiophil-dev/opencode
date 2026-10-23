@@ -11,6 +11,7 @@ import {
   onCleanup,
   type Setter,
   splitProps,
+  untrack,
 } from "solid-js"
 import { isServer, render } from "solid-js/web"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
@@ -50,6 +51,7 @@ type RenderedBlock =
 type RenderResult = {
   text: string
   blocks: RenderedBlock[]
+  error?: boolean
 }
 
 const renderedCodeTokens = new WeakMap<HTMLDivElement, RenderedCodeState>()
@@ -330,10 +332,16 @@ function setupCodeCopy(root: HTMLDivElement, getLabels: () => CopyLabels) {
   }
 }
 
-function initialResult(text: string, key: string | undefined, projection: Projection, owner: string): RenderResult {
+function initialResult(
+  text: string,
+  key: string | undefined,
+  projection: Projection,
+  owner: string,
+  placeholder = false,
+): RenderResult {
   if (!text) return { text, blocks: [] }
   const base = key ?? checksum(text)
-  if (base) {
+  if (!placeholder && base) {
     const blocks = projection.blocks.flatMap((block, index) => {
       if (block.mode === "code") return []
       const cacheKey = `${base}:${index}:${block.mode}`
@@ -357,6 +365,34 @@ function initialResult(text: string, key: string | undefined, projection: Projec
   }
 }
 
+function fallbackResult(text: string, base: string | undefined): RenderResult {
+  return {
+    text,
+    blocks: [
+      {
+        key: base ?? "fallback",
+        mode: "full",
+        raw: text,
+        hash: checksum(text) ?? "",
+        html: fallback(text),
+      },
+    ],
+  }
+}
+
+async function transformBlocks(
+  blocks: RenderedBlock[],
+  transform: (safeHtml: string) => Promise<string> | string,
+): Promise<RenderedBlock[]> {
+  return Promise.all(
+    blocks.map(async (block) => {
+      if (block.mode === "code") return block
+      const html = sanitizeMarkdown(await transform(block.html))
+      return { key: block.key, mode: block.mode, raw: block.raw, hash: checksum(html) ?? "", html }
+    }),
+  )
+}
+
 function pendingProjection(text: string): Projection {
   return { text, blocks: text ? [{ raw: text, src: text, mode: "live" }] : [] }
 }
@@ -368,9 +404,19 @@ export function Markdown(
     streaming?: boolean
     class?: string
     classList?: Record<string, boolean>
+    transformHtml?: (safeHtml: string) => Promise<string> | string
+    onRendered?: () => void
   },
 ) {
-  const [local, others] = splitProps(props, ["text", "cacheKey", "streaming", "class", "classList"])
+  const [local, others] = splitProps(props, [
+    "text",
+    "cacheKey",
+    "streaming",
+    "class",
+    "classList",
+    "transformHtml",
+    "onRendered",
+  ])
   const i18n = useI18n()
   const [root, setRoot] = createSignal<HTMLDivElement>()
   const owner = createUniqueId()
@@ -402,6 +448,7 @@ export function Markdown(
           text: local.text,
           key: local.cacheKey,
           projection: pendingProjection(local.text),
+          transform: local.transformHtml,
         }
       const value = !(local.streaming ?? false) && !streamed ? completedProjection(local.text) : projection.latest
       if (!value || value.text !== local.text) return
@@ -409,9 +456,10 @@ export function Markdown(
         text: local.text,
         key: local.cacheKey,
         projection: value,
+        transform: local.transformHtml,
       }
     },
-    async (src) => {
+    async (src): Promise<RenderResult> => {
       if (isServer)
         return {
           text: src.text,
@@ -428,7 +476,7 @@ export function Markdown(
       if (!src.text) return { text: src.text, blocks: [] } satisfies RenderResult
 
       const base = src.key ?? checksum(src.text)
-      return Promise.all(
+      const result = await Promise.all(
         src.projection.blocks.map(async (block, index) => {
           const key = base ? `${base}:${index}:${block.mode}` : undefined
           const blockKey = markdownBlockKey(owner, src.key, index, block.mode)
@@ -464,21 +512,14 @@ export function Markdown(
         }),
       )
         .then((blocks) => ({ text: src.text, blocks }) satisfies RenderResult)
-        .catch(
-          () =>
-            ({
-              text: src.text,
-              blocks: [
-                {
-                  key: base ?? "fallback",
-                  mode: "full" as const,
-                  raw: src.text,
-                  hash: checksum(src.text) ?? "",
-                  html: fallback(src.text),
-                },
-              ],
-            }) satisfies RenderResult,
-        )
+        .catch(() => fallbackResult(src.text, base))
+
+      if (!src.transform || (local.streaming ?? false)) return result
+      try {
+        return { text: result.text, blocks: await transformBlocks(result.blocks, src.transform) } satisfies RenderResult
+      } catch {
+        return { text: src.text, blocks: [], error: true } satisfies RenderResult
+      }
     },
     {
       initialValue: initialResult(
@@ -486,6 +527,7 @@ export function Markdown(
         local.cacheKey,
         local.streaming ? pendingProjection(local.text) : completedProjection(local.text),
         owner,
+        !!local.transformHtml,
       ),
     },
   )
@@ -496,9 +538,16 @@ export function Markdown(
     const container = root()
     const result = html.latest ?? html()
     const projected = currentProjection()
-    const content = local.text ? pendingBlocks(result, projected, local.cacheKey, owner) : []
     if (!container) return
     if (isServer) return
+    if (result?.error) {
+      container.dataset.markdownError = "true"
+      disposeCopyButtons(container)
+      container.innerHTML = ""
+      return
+    }
+    delete container.dataset.markdownError
+    const content = local.text ? pendingBlocks(result, projected, local.cacheKey, owner) : []
     if (content.length === 0) {
       disposeCopyButtons(container)
       container.innerHTML = ""
@@ -530,6 +579,7 @@ export function Markdown(
         copy: i18n.t("ui.message.copy"),
         copied: i18n.t("ui.message.copied"),
       }))
+    untrack(() => local.onRendered?.())
   })
 
   onCleanup(() => {

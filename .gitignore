@@ -33,3 +33,23 @@ logs/
 *.bun-build
 tsconfig.tsbuildinfo
 /artifacts/
+
+# OpenCode file preview task state (union of setup root 20ddde0 runtime ignores)
+handovers/
+.opencode/magic-context/historian/
+*.log
+/builds/
+.omo/boulder.json
+.omo/evidence/
+.omo/drafts/
+.omo/ulw-execute/
+
+# Wrapper-generated build identity (task 10); never tracked
+/packages/app/public/file-preview-build.json
+
+# Generated Playwright output (task 11 QA); historical copies live under .omo/evidence
+/packages/app/e2e/file-preview-results/
+
+# Private project context
+/workspace/
+/handover.md

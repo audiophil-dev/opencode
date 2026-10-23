@@ -23,11 +23,20 @@ function isEditable(node: unknown): boolean {
   return /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(node.tagName)
 }
 
+// A display:none file view (hidden source pane behind a preview, inactive layout) must
+// never claim the browser find shortcut for its invisible search UI.
+function isHostVisible(host: FindHost): boolean {
+  const el = host.element()
+  if (!el) return false
+  if (typeof el.checkVisibility === "function") return el.checkVisibility()
+  return el.offsetParent !== null
+}
+
 function hostForNode(node: unknown) {
   if (!(node instanceof Node)) return
   for (const host of hosts) {
     const el = host.element()
-    if (el && el.isConnected && el.contains(node)) return host
+    if (el && el.isConnected && el.contains(node) && isHostVisible(host)) return host
   }
 }
 
@@ -48,7 +57,7 @@ function installShortcuts() {
       const key = event.key.toLowerCase()
       if (key === "g") {
         const host = current
-        if (!host || !host.isOpen()) return
+        if (!host || !host.isOpen() || !isHostVisible(host)) return
         event.preventDefault()
         event.stopPropagation()
         host.next(event.shiftKey ? -1 : 1)
@@ -58,14 +67,18 @@ function installShortcuts() {
       if (key !== "f") return
 
       const active = current
-      if (active && active.isOpen()) {
+      if (active && active.isOpen() && isHostVisible(active)) {
         event.preventDefault()
         event.stopPropagation()
         active.open()
         return
       }
 
-      const host = hostForNode(document.activeElement) ?? hostForNode(event.target) ?? target ?? Array.from(hosts)[0]
+      const host =
+        hostForNode(document.activeElement) ??
+        hostForNode(event.target) ??
+        (target && isHostVisible(target) ? target : undefined) ??
+        Array.from(hosts).find(isHostVisible)
       if (!host) return
 
       event.preventDefault()

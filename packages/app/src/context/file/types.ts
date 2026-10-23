@@ -20,6 +20,12 @@ export type FileViewState = {
   selectedLines?: SelectedLineRange | null
 }
 
+export type FileAdmission = {
+  budget: number
+  bytes: number
+  rejected: boolean
+}
+
 export type FileState = {
   path: string
   name: string
@@ -27,6 +33,8 @@ export type FileState = {
   loading?: boolean
   error?: string
   content?: FileContent
+  admission?: FileAdmission
+  requestId?: number
 }
 
 export function selectionFromLines(range: SelectedLineRange): FileSelection {

@@ -73,6 +73,10 @@ export type FileSearchHandle = {
 
 export type FileSearchControl = {
   register: (handle: FileSearchHandle | null) => void
+  // Reactive presentation gate for the portaled find bar (hidden while a tab shows
+  // Preview). Absent means visible: existing callers keep their exact behavior. The
+  // find controller, query and selection state stay mounted regardless of this gate.
+  visible?: () => boolean
 }
 
 export type TextFileProps<T = {}> = FileOptions<T> &
@@ -695,6 +699,7 @@ function ViewerShell(props: {
   viewer: ReturnType<typeof useFileViewer>
   class: string | undefined
   classList: ComponentProps<"div">["classList"] | undefined
+  searchVisible?: () => boolean
 }) {
   return (
     <div
@@ -718,6 +723,7 @@ function ViewerShell(props: {
           query={props.viewer.find.query}
           count={props.viewer.find.count}
           index={props.viewer.find.index}
+          visible={props.searchVisible}
           setInput={props.viewer.find.setInput}
           onInput={props.viewer.find.setQuery}
           onKeyDown={props.viewer.find.onInputKeyDown}
@@ -876,10 +882,19 @@ function TextViewer<T>(props: TextFileProps<T>) {
     onLineNumberSelectionEnd: (range) => local.onLineNumberSelectionEnd?.(range),
   })
 
+  // A pierre re-render that replaces line DOM collapses registered find Ranges in
+  // place (key present, text empty); rescan after each DOM commit, not on unmount.
+  const onPostRender: FileOptions<T>["onPostRender"] = (node, instance, phase) => {
+    others.onPostRender?.(node, instance, phase)
+    if (phase === "unmount") return
+    viewer.find.refresh()
+  }
+
   const options = createMemo(() => ({
     ...createDefaultOptions<T>("unified"),
     ...others,
     ...lineCallbacks,
+    onPostRender,
   }))
 
   const notify = () => {
@@ -946,7 +961,15 @@ function TextViewer<T>(props: TextFileProps<T>) {
     virtuals.cleanup()
   })
 
-  return <ViewerShell mode="text" viewer={viewer} class={local.class} classList={local.classList} />
+  return (
+    <ViewerShell
+      mode="text"
+      viewer={viewer}
+      class={local.class}
+      classList={local.classList}
+      searchVisible={() => local.search?.visible?.() ?? true}
+    />
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,11 +1099,18 @@ function DiffViewer<T>(props: DiffFileProps<T>) {
     onLineNumberSelectionEnd: (range) => local.onLineNumberSelectionEnd?.(range),
   })
 
+  const onPostRender: FileDiffOptions<T>["onPostRender"] = (node, instance, phase) => {
+    others.onPostRender?.(node, instance, phase)
+    if (phase === "unmount") return
+    viewer.find.refresh()
+  }
+
   const options = createMemo<FileDiffOptions<T>>(() => {
     const base = {
       ...createDefaultOptions(props.diffStyle),
       ...others,
       ...lineCallbacks,
+      onPostRender,
     }
 
     const perf = large() ? { ...base, ...largeOptions } : base
@@ -1214,7 +1244,15 @@ function DiffViewer<T>(props: DiffFileProps<T>) {
     dragEndSide = undefined
   })
 
-  return <ViewerShell mode="diff" viewer={viewer} class={local.class} classList={local.classList} />
+  return (
+    <ViewerShell
+      mode="diff"
+      viewer={viewer}
+      class={local.class}
+      classList={local.classList}
+      searchVisible={() => local.search?.visible?.() ?? true}
+    />
+  )
 }
 
 // ---------------------------------------------------------------------------

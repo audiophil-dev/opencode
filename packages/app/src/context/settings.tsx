@@ -3,6 +3,7 @@ import { batch, createEffect, createMemo, createSignal, onCleanup } from "solid-
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { persisted } from "@/utils/persist"
 import { usePlatform } from "@/context/platform"
+import { writeFileTabReloadHandoffFromCapture } from "@/pages/session/file-tab-reload-handoff"
 
 export interface NotificationSettings {
   agent: boolean
@@ -432,6 +433,9 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
         setNewLayoutDesigns(value: boolean) {
           const next = oldInterfaceRetired() ? true : value
           if (newLayoutDesigns() === next) return
+          // The reload below wipes the in-memory file tab preview state: arm the one-time
+          // open-tab handoff before the reactive flip so the chosen mode survives it.
+          writeFileTabReloadHandoffFromCapture()
           setStore("general", "newLayoutDesigns", next)
           if (typeof window !== "undefined") setTimeout(() => window.location.reload())
         },

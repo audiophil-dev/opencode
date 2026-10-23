@@ -12,6 +12,7 @@ import { useLayout } from "@/context/layout"
 import { createPathHelpers } from "./file/path"
 import {
   approxBytes,
+  canAdmitFileContent,
   evictContentLru,
   getFileContentBytesTotal,
   getFileContentEntryCount,
@@ -28,6 +29,7 @@ import { createFileTreeStore } from "./file/tree-store"
 import { invalidateFromWatcher } from "./file/watcher"
 import {
   selectionFromLines,
+  type FileAdmission,
   type FileState,
   type FileSelection,
   type FileViewState,
@@ -70,6 +72,8 @@ export const { use: useFile, provider: FileProvider } = createSimpleContext({
     )
 
     const inflight = new Map<string, Promise<void>>()
+    const inflightBounded = new Map<string, Promise<void>>()
+    let nextRequestId = 1
     const [store, setStore] = createStore<{
       file: Record<string, FileState>
     }>({
@@ -109,6 +113,7 @@ export const { use: useFile, provider: FileProvider } = createSimpleContext({
     createEffect(() => {
       scope()
       inflight.clear()
+      inflightBounded.clear()
       resetFileContentLru()
       batch(() => {
         setStore("file", reconcile({}))
@@ -136,7 +141,7 @@ export const { use: useFile, provider: FileProvider } = createSimpleContext({
       )
     }
 
-    const setLoaded = (file: string, content: FileState["content"]) => {
+    const setLoaded = (file: string, content: FileState["content"], admission?: FileAdmission, requestId?: number) => {
       setStore(
         "file",
         file,
@@ -144,6 +149,22 @@ export const { use: useFile, provider: FileProvider } = createSimpleContext({
           draft.loaded = true
           draft.loading = false
           draft.content = content
+          draft.admission = admission
+          draft.requestId = requestId
+        }),
+      )
+    }
+
+    const setAdmissionRejected = (file: string, admission: FileAdmission) => {
+      removeFileContentBytes(file)
+      setStore(
+        "file",
+        file,
+        produce((draft) => {
+          draft.loading = false
+          draft.loaded = false
+          draft.content = undefined
+          draft.admission = admission
         }),
       )
     }
@@ -164,18 +185,42 @@ export const { use: useFile, provider: FileProvider } = createSimpleContext({
       })
     }
 
-    const load = (input: string, options?: { force?: boolean }) => {
+    const load = (input: string, options?: { force?: boolean; budget?: number }) => {
       const file = path.normalize(input)
       if (!file) return Promise.resolve()
 
       const directory = scope()
       const key = `${directory}\n${file}`
+      const bounded = options?.budget !== undefined
+      const boundedKey = bounded ? `${key}\n${options?.budget}` : key
       ensure(file)
 
       const current = store.file[file]
-      if (!options?.force && current?.loaded) return Promise.resolve()
+      if (!options?.force && current?.loaded) {
+        // A default consumer taking ownership of a cached bounded entry hands
+        // the watcher policy back to unbounded without re-reading, and bumps
+        // the generation so an in-flight bounded read cannot roll it back.
+        if (options?.budget === undefined && current.admission !== undefined) {
+          const handoffId = nextRequestId++
+          setStore(
+            "file",
+            file,
+            produce((draft) => {
+              draft.admission = undefined
+              draft.requestId = handoffId
+            }),
+          )
+        }
+        return Promise.resolve()
+      }
 
-      const pending = inflight.get(key)
+      const requestId = nextRequestId++
+      const previousRequestId = current?.requestId
+
+      // A bounded caller may reuse an unbounded read (it publishes the same
+      // content), but an unbounded caller must never join a bounded read that
+      // could be rejected.
+      const pending = bounded ? (inflight.get(key) ?? inflightBounded.get(boundedKey)) : inflight.get(key)
       if (pending) return pending
 
       setLoading(file)
@@ -184,11 +229,24 @@ export const { use: useFile, provider: FileProvider } = createSimpleContext({
         .client.file.read({ path: file })
         .then((x) => {
           if (scope() !== directory) return
+          // A bounded completion from before a newer commit must not clobber
+          // it; an unbounded completion keeps the existing last-write behavior.
+          if (bounded && store.file[file]?.requestId !== previousRequestId) return
           const content = x.data
-          setLoaded(file, content)
+          if (!content) {
+            setLoaded(file, content, undefined, requestId)
+            return
+          }
 
-          if (!content) return
-          touchFileContent(file, approxBytes(content))
+          const bytes = approxBytes(content)
+          const budget = options?.budget
+          if (budget !== undefined && (bytes > budget || !canAdmitFileContent(file, bytes))) {
+            setAdmissionRejected(file, { budget, bytes, rejected: true })
+            return
+          }
+
+          setLoaded(file, content, budget === undefined ? undefined : { budget, bytes, rejected: false }, requestId)
+          touchFileContent(file, bytes)
           evictContent(new Set([file]))
         })
         .catch((e) => {
@@ -196,10 +254,12 @@ export const { use: useFile, provider: FileProvider } = createSimpleContext({
           setLoadError(file, errorMessage(e, language.t("error.chain.unknown")))
         })
         .finally(() => {
-          inflight.delete(key)
+          if (bounded) inflightBounded.delete(boundedKey)
+          else inflight.delete(key)
         })
 
-      inflight.set(key, promise)
+      if (bounded) inflightBounded.set(boundedKey, promise)
+      else inflight.set(key, promise)
       return promise
     }
 
@@ -228,7 +288,8 @@ export const { use: useFile, provider: FileProvider } = createSimpleContext({
         hasFile: (file) => Boolean(store.file[file]),
         isOpen: (file) => tabs.all().some((tab) => path.pathFromTab(tab) === file),
         loadFile: (file) => {
-          void load(file, { force: true })
+          const admission = store.file[file]?.admission
+          void load(file, { force: true, ...(admission ? { budget: admission.budget } : {}) })
         },
         node: tree.node,
         isDirLoaded: tree.isLoaded,

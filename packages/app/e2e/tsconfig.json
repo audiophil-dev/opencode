@@ -6,6 +6,8 @@
     "types": ["node", "bun"]
   },
   "include": [
+    "./file-preview/**/*.ts",
+    "../playwright.file-preview.config.ts",
     "./performance/timeline-stability/**/*.spec.ts",
     "./performance/timeline-stability/fixture.test.ts",
     "./performance/timeline-stability/fixture.ts",

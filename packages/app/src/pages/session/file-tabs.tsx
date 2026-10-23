@@ -1,9 +1,22 @@
-import { createEffect, createMemo, createSignal, Match, on, onCleanup, Show, Switch } from "solid-js"
-import { createStore } from "solid-js/store"
+import {
+  createContext,
+  createEffect,
+  createMemo,
+  createSignal,
+  useContext,
+  Match,
+  on,
+  onCleanup,
+  Show,
+  Switch,
+  type JSX,
+} from "solid-js"
+import { createStore, produce } from "solid-js/store"
 import { Dynamic } from "solid-js/web"
 import { makeEventListener } from "@solid-primitives/event-listener"
 import type { FileSearchHandle } from "@opencode-ai/session-ui/file"
 import { useFileComponent } from "@opencode-ai/ui/context/file"
+import { Button } from "@opencode-ai/ui/button"
 import { cloneSelectedLineRange, previewSelectedLines } from "@opencode-ai/session-ui/pierre/selection-bridge"
 import { createLineCommentController } from "@opencode-ai/session-ui/line-comment-annotations"
 import { createLineCommentControllerV2 } from "@opencode-ai/session-ui/v2/line-comment-annotations-v2"
@@ -15,17 +28,209 @@ import { MenuV2 } from "@opencode-ai/ui/v2/menu-v2"
 import { Tabs } from "@opencode-ai/ui/tabs"
 import { ScrollView } from "@opencode-ai/ui/scroll-view"
 import { showToast } from "@/utils/toast"
-import { selectionFromLines, useFile, type FileSelection, type SelectedLineRange } from "@/context/file"
+import { useSDK } from "@/context/sdk"
+import { selectionFromLines, useFile, type FileSelection, type FileState, type SelectedLineRange } from "@/context/file"
 import { useComments } from "@/context/comments"
 import { useLanguage } from "@/context/language"
 import { usePrompt } from "@/context/prompt"
 import { useSettings } from "@/context/settings"
 import { getSessionHandoff } from "@/pages/session/handoff"
+import {
+  registerFileTabReloadHandoffCapture,
+  takeFileTabReloadHandoff,
+  type FileTabReloadHandoffTab,
+} from "@/pages/session/file-tab-reload-handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { createSessionTabs } from "@/pages/session/helpers"
+import {
+  FilePreview,
+  isPreviewSourceTooLarge,
+  type FilePreviewAnchorRequest,
+  type FilePreviewNavigateRequest,
+} from "@/pages/session/file-preview"
 
 type SessionFileViewProps = {
   tab: string
+}
+
+// ---------------------------------------------------------------------------
+// Shared Preview/Source state and helpers (above the V1/V2 layout split)
+// ---------------------------------------------------------------------------
+
+export type FileTabViewMode = "preview" | "source"
+
+const previewExtensions = new Set(["md", "markdown", "mdx"])
+
+function previewEligiblePath(path: string | undefined) {
+  if (!path) return false
+  const index = path.lastIndexOf(".")
+  if (index === -1) return false
+  return previewExtensions.has(path.slice(index + 1).toLowerCase())
+}
+
+// Eligibility is size-bound: an over-5 MiB Markdown source keeps the source viewer as
+// the mode (with its own localized explanation) instead of mounting a preview that
+// would refuse to parse it. The limit counts UTF-8 bytes, not JS characters.
+export function previewEligible(path: string | undefined, content: FileState["content"]) {
+  if (!previewEligiblePath(path)) return false
+  if (content?.type !== "text" || typeof content.content !== "string") return false
+  return !isPreviewSourceTooLarge(content.content)
+}
+
+type FileTabPreviewTabState = {
+  mode?: FileTabViewMode
+  anchor?: FilePreviewAnchorRequest
+  scroll?: ScrollPos
+}
+
+const FileTabPreviewContext = createContext<
+  | {
+      mode: (tab: string) => FileTabViewMode | undefined
+      setMode: (tab: string, mode: FileTabViewMode) => void
+      anchor: (tab: string) => FilePreviewAnchorRequest | undefined
+      requestAnchor: (tab: string, intent: { path: string; fragment: string }) => void
+      scroll: (tab: string) => ScrollPos | undefined
+      setScroll: (tab: string, pos: ScrollPos) => void
+    }
+  | undefined
+>(undefined)
+
+// Per-open-tab preview state shared across sibling file tabs, above the V1/V2 split so a
+// layout switch never resets it. Entries drop reactively once their tab is no longer open,
+// so closing and reopening a file restarts from the default mode. The only thing that
+// ever leaves this store is the one-time reload handoff (file-tab-reload-handoff.ts),
+// written when the layout setting is about to reload the whole document: it carries only
+// the open tabs' chosen mode and preview scroll across that single reload, is consumed
+// once by the next document, and never survives closing the browser tab.
+export function FileTabPreviewStateProvider(props: { children: JSX.Element }) {
+  const { sessionKey, tabs, ready } = useSessionLayout()
+  const [state, setState] = createStore<Record<string, Record<string, FileTabPreviewTabState>>>({})
+
+  createEffect(() => {
+    const session = sessionKey()
+    const all = tabs().all()
+    const current = state[session]
+    if (!current) return
+    const stale = Object.keys(current).filter((tab) => !all.includes(tab))
+    if (stale.length === 0) return
+    setState(
+      session,
+      produce((draft) => {
+        if (!draft) return
+        for (const tab of stale) delete draft[tab]
+      }),
+    )
+  })
+
+  const api = {
+    mode: (tab: string) => state[sessionKey()]?.[tab]?.mode,
+    setMode: (tab: string, mode: FileTabViewMode) => {
+      const session = sessionKey()
+      if (!state[session]) setState(session, {})
+      if (!state[session][tab]) {
+        setState(session, tab, { mode })
+        return
+      }
+      setState(session, tab, "mode", mode)
+    },
+    anchor: (tab: string) => state[sessionKey()]?.[tab]?.anchor,
+    requestAnchor: (tab: string, intent: { path: string; fragment: string }) => {
+      const session = sessionKey()
+      if (!state[session]) setState(session, {})
+      const revision = (state[session][tab]?.anchor?.revision ?? -1) + 1
+      if (!state[session][tab]) {
+        setState(session, tab, { anchor: { path: intent.path, fragment: intent.fragment, revision } })
+        return
+      }
+      setState(session, tab, "anchor", { path: intent.path, fragment: intent.fragment, revision })
+    },
+    scroll: (tab: string) => state[sessionKey()]?.[tab]?.scroll,
+    setScroll: (tab: string, pos: ScrollPos) => {
+      const session = sessionKey()
+      if (!state[session]) setState(session, {})
+      if (!state[session][tab]) {
+        setState(session, tab, { scroll: pos })
+        return
+      }
+      setState(session, tab, "scroll", pos)
+    },
+  }
+
+  // Reload handoff, write side: the layout-setting flip (context/settings) calls the
+  // registered capture once, immediately before reloading the document. Only this active
+  // session's still-open tabs - per the same tab store that drives the stale pruning above -
+  // and only mode/preview-scroll values cross the reload.
+  onCleanup(
+    registerFileTabReloadHandoffCapture(() => {
+      const owner = sessionKey()
+      const chosen: Record<string, FileTabReloadHandoffTab> = {}
+      for (const tab of tabs().all()) {
+        const entry = state[owner]?.[tab]
+        if (!entry?.mode && !entry?.scroll) continue
+        chosen[tab] = {
+          ...(entry.mode ? { mode: entry.mode } : {}),
+          ...(entry.scroll ? { scroll: { x: entry.scroll.x, y: entry.scroll.y } } : {}),
+        }
+      }
+      return { owner, tabs: chosen }
+    }),
+  )
+
+  // Reload handoff, read side: consume exactly once per provider mount after the tab
+  // store is hydrated, and reattach modes only to tabs that are still open in this
+  // session. The helper skips same-document reads, so a remount before the scheduled
+  // reload never consumes it; the fresh document from the reload does.
+  let restoredReloadHandoff = false
+  createEffect(() => {
+    if (restoredReloadHandoff) return
+    if (!ready()) return
+    restoredReloadHandoff = true
+    const taken = takeFileTabReloadHandoff(sessionKey())
+    if (!taken) return
+    const all = tabs().all()
+    for (const [tab, entry] of Object.entries(taken)) {
+      if (!all.includes(tab)) continue
+      if (entry.mode) api.setMode(tab, entry.mode)
+      if (entry.scroll) api.setScroll(tab, entry.scroll)
+    }
+  })
+
+  return <FileTabPreviewContext.Provider value={api}>{props.children}</FileTabPreviewContext.Provider>
+}
+
+function useFileTabPreviewState() {
+  const ctx = useContext(FileTabPreviewContext)
+  if (!ctx) throw new Error("FileTabPreviewStateProvider must wrap the session file tabs")
+  return ctx
+}
+
+function PreviewSourceControls(props: {
+  mode: FileTabViewMode
+  groupLabel: string
+  previewLabel: string
+  sourceLabel: string
+  onSelect: (mode: FileTabViewMode) => void
+}) {
+  return (
+    <div role="group" aria-label={props.groupLabel} class="flex items-center gap-1 px-4 pt-2">
+      <Button
+        variant="ghost"
+        size="small"
+        aria-pressed={props.mode === "preview"}
+        onClick={() => props.onSelect("preview")}
+      >
+        {props.previewLabel}
+      </Button>
+      <Button
+        variant="ghost"
+        size="small"
+        aria-pressed={props.mode === "source"}
+        onClick={() => props.onSelect("source")}
+      >
+        {props.sourceLabel}
+      </Button>
+    </div>
+  )
 }
 
 const selectionSide = (range: SelectedLineRange) => range.endSide ?? range.side ?? "additions"
@@ -228,7 +433,9 @@ function SessionFileViewV1(props: { tab: string }) {
   const comments = useComments()
   const language = useLanguage()
   const prompt = usePrompt()
+  const sdk = useSDK()
   const fileComponent = useFileComponent()
+  const previewState = useFileTabPreviewState()
   const { sessionKey, tabs, view } = useSessionLayout()
   const activeFileTab = createSessionTabs({
     tabs,
@@ -242,6 +449,11 @@ function SessionFileViewV1(props: { tab: string }) {
     register: (handle: FileSearchHandle | null) => {
       find = handle
     },
+    // The portaled find bar must not float over Preview or a non-file panel. The tab ids
+    // compared here are canonical: file tabs are opened as file.tab(path), so the literal
+    // active() identity is used - activeFileTab would fall back to the first opened tab
+    // when Review is selected (no review callback is passed) and keep the bar visible.
+    visible: () => tabs().active() === props.tab && mode() === "source",
   }
 
   const path = createMemo(() => file.pathFromTab(props.tab))
@@ -262,6 +474,82 @@ function SessionFileViewV1(props: { tab: string }) {
     tab: () => props.tab,
     view,
   })
+
+  const previewReady = createMemo(() => previewEligible(path(), state()?.content))
+  // Ineligible tabs (non-Markdown, non-text, oversized) always resolve to Source, even if
+  // a stale explicit "preview" mode exists - that combination would otherwise hide both
+  // panes. The stored mode stays intact for when the file becomes eligible again.
+  const mode = createMemo<FileTabViewMode>(() => {
+    if (!previewReady()) return "source"
+    return previewState.mode(props.tab) ?? "preview"
+  })
+  const selectMode = (next: FileTabViewMode) => previewState.setMode(props.tab, next)
+  const [sourceMounted, setSourceMounted] = createSignal(mode() === "source")
+
+  // Once Source has been visited its renderer stays mounted; returning to Preview only
+  // hides it, and a fresh visit requeues the pending source scroll restoration.
+  createEffect(
+    on(
+      mode,
+      (value) => {
+        if (value !== "source") return
+        setSourceMounted(true)
+        scrollSync.queueRestore()
+      },
+      { defer: true },
+    ),
+  )
+
+  const previewAnchor = createMemo(() => previewState.anchor(props.tab))
+
+  // A fresh external selection request (deep link, session handoff apply, line-linked
+  // navigation) targets source lines, so select Source on the request transition itself,
+  // before any restoration. The readiness boundary itself is not a request: there the
+  // memo only swaps its source (handoff/null -> preserved store range), so it must not
+  // pull a Preview tab back to Source. An explicit handoff still consumes once through
+  // its own readiness effect below. Prior readiness is tracked manually because Solid's
+  // on(..., { defer: true }) leaves prevInput undefined on the first firing.
+  let prevReady = file.ready()
+  createEffect(
+    on(
+      [selectedLines, file.ready],
+      ([range, ready]) => {
+        const boundary = !prevReady && ready
+        prevReady = ready
+        if (!range || boundary) return
+        if (mode() !== "source") selectMode("source")
+      },
+      { defer: true },
+    ),
+  )
+
+  // A handoff deep link carries its selection before the file store is ready. The false
+  // -> true readiness transition is the initial consumption point for that request: it
+  // selects Source exactly once, whether or not the store was seeded in the meantime.
+  createEffect(
+    on(file.ready, (ready, prev) => {
+      if (!ready || prev !== false) return
+      const p = path()
+      if (!p) return
+      const range = getSessionHandoff(sessionKey())?.files[p] as SelectedLineRange | undefined
+      if (!range) return
+      if (mode() !== "source") selectMode("source")
+    }),
+  )
+
+  const openPreviewTarget = (request: FilePreviewNavigateRequest) => {
+    // Use the native file-opening helpers ordering without an outer batch.
+    void file.load(request.tab)
+    tabs().open(request.tab)
+    tabs().setActive(request.tab)
+    // An anchored navigation is a preview request: bring the destination back to
+    // Preview before the anchor arrives so the heading can scroll there. Its source
+    // state stays mounted, so selection, draft and scroll survive the mode switch.
+    if (previewEligiblePath(request.path)) previewState.setMode(request.tab, "preview")
+    if (request.fragment) {
+      previewState.requestAnchor(request.tab, { path: request.path, fragment: request.fragment })
+    }
+  }
 
   const selectionPreview = (source: string, selection: FileSelection) => {
     return previewSelectedLines(source, {
@@ -394,9 +682,14 @@ function SessionFileViewV1(props: { tab: string }) {
     if (typeof window === "undefined") return
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (activeFileTab() !== props.tab) return
+      // Same selected-tab predicate as the find visibility gate: activeFileTab falls back
+      // to the first opened tab while Review is selected and would swallow native find.
+      if (tabs().active() !== props.tab) return
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return
       if (event.key.toLowerCase() !== "f") return
+      // In Preview the hidden source find must not take Cmd/Ctrl+F; the browser's native
+      // find applies there. Only Source routes the request into the registered handler.
+      if (mode() !== "source") return
 
       event.preventDefault()
       event.stopPropagation()
@@ -426,6 +719,7 @@ function SessionFileViewV1(props: { tab: string }) {
     const target = fileComments().find((comment) => comment.id === focus.id)
     if (!target) return
 
+    if (mode() !== "source") selectMode("source")
     commentsUi.note.openComment(target.id, target.selection, { cancelDraft: true })
     requestAnimationFrame(() => comments.clearFocus())
   })
@@ -470,6 +764,9 @@ function SessionFileViewV1(props: { tab: string }) {
           commentsUi.onLineSelected(range)
         }}
         onLineSelectionEnd={(range: SelectedLineRange | null) => {
+          // A hidden source cannot legitimately end a selection; dropping the null here
+          // keeps mode switches from clearing selections or drafts.
+          if (!range && mode() !== "source") return
           commentsUi.onLineSelectionEnd(range)
         }}
         search={search}
@@ -491,17 +788,55 @@ function SessionFileViewV1(props: { tab: string }) {
     </div>
   )
 
+  const sourceVisible = () => mode() === "source" || !state()?.loaded
+  const oversized = () =>
+    previewEligiblePath(path()) && state()?.content?.type === "text" && isPreviewSourceTooLarge(contents())
+
   const content = () => (
-    <div class="mt-3 relative h-full min-h-0">
-      <ScrollView class="h-full" viewportRef={scrollSync.setViewport} onScroll={scrollSync.handleScroll as any}>
-        <Switch>
-          <Match when={state()?.loaded}>{renderFile(contents())}</Match>
-          <Match when={state()?.loading}>
-            <div class="px-6 py-4 text-text-weak">{language.t("common.loading")}...</div>
-          </Match>
-          <Match when={state()?.error}>{(err) => <div class="px-6 py-4 text-text-weak">{err()}</div>}</Match>
-        </Switch>
-      </ScrollView>
+    <div class="mt-3 relative h-full min-h-0 flex flex-col">
+      <Show when={previewReady()}>
+        <PreviewSourceControls
+          mode={mode()}
+          groupLabel={language.t("filePreview.mode.group")}
+          previewLabel={language.t("filePreview.mode.preview")}
+          sourceLabel={language.t("filePreview.mode.source")}
+          onSelect={selectMode}
+        />
+      </Show>
+      <Show when={oversized()}>
+        <div data-file-preview-too-large class="px-4 pt-2 text-text-weak">
+          {language.t("filePreview.tooLarge", { size: "5 MiB" })}
+        </div>
+      </Show>
+      <div class="relative flex-1 min-h-0">
+        <Show when={sourceMounted() || !state()?.loaded}>
+          <div data-slot="file-source-pane" class="h-full" style={{ display: sourceVisible() ? "" : "none" }}>
+            <ScrollView class="h-full" viewportRef={scrollSync.setViewport} onScroll={scrollSync.handleScroll as any}>
+              <Switch>
+                <Match when={state()?.loaded}>{renderFile(contents())}</Match>
+                <Match when={state()?.loading}>
+                  <div class="px-6 py-4 text-text-weak">{language.t("common.loading")}...</div>
+                </Match>
+                <Match when={state()?.error}>{(err) => <div class="px-6 py-4 text-text-weak">{err()}</div>}</Match>
+              </Switch>
+            </ScrollView>
+          </div>
+        </Show>
+        <Show when={previewReady() && mode() === "preview" && state()?.loaded}>
+          <FilePreview
+            class="h-full overflow-y-auto"
+            path={path() ?? ""}
+            source={contents()}
+            directory={sdk().directory}
+            owner={sessionKey()}
+            anchor={previewAnchor() ?? null}
+            initialScroll={previewState.scroll(props.tab) ?? null}
+            onScrollChange={(pos) => previewState.setScroll(props.tab, pos)}
+            onRequestNavigate={openPreviewTarget}
+            onRequestSource={() => selectMode("source")}
+          />
+        </Show>
+      </div>
     </div>
   )
 
@@ -513,7 +848,9 @@ function SessionFileViewV2(props: { tab: string }) {
   const comments = useComments()
   const language = useLanguage()
   const prompt = usePrompt()
+  const sdk = useSDK()
   const fileComponent = useFileComponent()
+  const previewState = useFileTabPreviewState()
   const { sessionKey, tabs, view } = useSessionLayout()
   const activeFileTab = createSessionTabs({
     tabs,
@@ -527,6 +864,11 @@ function SessionFileViewV2(props: { tab: string }) {
     register: (handle: FileSearchHandle | null) => {
       find = handle
     },
+    // The portaled find bar must not float over Preview or a non-file panel. The tab ids
+    // compared here are canonical: file tabs are opened as file.tab(path), so the literal
+    // active() identity is used - activeFileTab would fall back to the first opened tab
+    // when Review is selected (no review callback is passed) and keep the bar visible.
+    visible: () => tabs().active() === props.tab && mode() === "source",
   }
 
   const path = createMemo(() => file.pathFromTab(props.tab))
@@ -547,6 +889,76 @@ function SessionFileViewV2(props: { tab: string }) {
     tab: () => props.tab,
     view,
   })
+
+  const previewReady = createMemo(() => previewEligible(path(), state()?.content))
+  // Same rule as V1: a stale explicit "preview" mode must not hide both panes.
+  const mode = createMemo<FileTabViewMode>(() => {
+    if (!previewReady()) return "source"
+    return previewState.mode(props.tab) ?? "preview"
+  })
+  const selectMode = (next: FileTabViewMode) => previewState.setMode(props.tab, next)
+  const [sourceMounted, setSourceMounted] = createSignal(mode() === "source")
+
+  // Once Source has been visited its renderer stays mounted; returning to Preview only
+  // hides it, and a fresh visit requeues the pending source scroll restoration.
+  createEffect(
+    on(
+      mode,
+      (value) => {
+        if (value !== "source") return
+        setSourceMounted(true)
+        scrollSync.queueRestore()
+      },
+      { defer: true },
+    ),
+  )
+
+  const previewAnchor = createMemo(() => previewState.anchor(props.tab))
+
+  // Same readiness rule as V1: the readiness boundary itself is hydration, not a
+  // request, so only a genuine selection transition selects Source. V1 lines 445-464
+  // are authoritative for this behavior.
+  let prevReady = file.ready()
+  createEffect(
+    on(
+      [selectedLines, file.ready],
+      ([range, ready]) => {
+        const boundary = !prevReady && ready
+        prevReady = ready
+        if (!range || boundary) return
+        if (mode() !== "source") selectMode("source")
+      },
+      { defer: true },
+    ),
+  )
+
+  // A handoff deep link carries its selection before the file store is ready. The false
+  // -> true readiness transition is the initial consumption point for that request: it
+  // selects Source exactly once, whether or not the store was seeded in the meantime.
+  createEffect(
+    on(file.ready, (ready, prev) => {
+      if (!ready || prev !== false) return
+      const p = path()
+      if (!p) return
+      const range = getSessionHandoff(sessionKey())?.files[p] as SelectedLineRange | undefined
+      if (!range) return
+      if (mode() !== "source") selectMode("source")
+    }),
+  )
+
+  const openPreviewTarget = (request: FilePreviewNavigateRequest) => {
+    // Use the native file-opening helpers ordering without an outer batch.
+    void file.load(request.tab)
+    tabs().open(request.tab)
+    tabs().setActive(request.tab)
+    // An anchored navigation is a preview request: bring the destination back to
+    // Preview before the anchor arrives so the heading can scroll there. Its source
+    // state stays mounted, so selection, draft and scroll survive the mode switch.
+    if (previewEligiblePath(request.path)) previewState.setMode(request.tab, "preview")
+    if (request.fragment) {
+      previewState.requestAnchor(request.tab, { path: request.path, fragment: request.fragment })
+    }
+  }
 
   const selectionPreview = (source: string, selection: FileSelection) => {
     return previewSelectedLines(source, {
@@ -677,9 +1089,14 @@ function SessionFileViewV2(props: { tab: string }) {
     if (typeof window === "undefined") return
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (activeFileTab() !== props.tab) return
+      // Same selected-tab predicate as the find visibility gate: activeFileTab falls back
+      // to the first opened tab while Review is selected and would swallow native find.
+      if (tabs().active() !== props.tab) return
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return
       if (event.key.toLowerCase() !== "f") return
+      // In Preview the hidden source find must not take Cmd/Ctrl+F; the browser's native
+      // find applies there. Only Source routes the request into the registered handler.
+      if (mode() !== "source") return
 
       event.preventDefault()
       event.stopPropagation()
@@ -709,6 +1126,8 @@ function SessionFileViewV2(props: { tab: string }) {
     const target = fileComments().find((comment) => comment.id === focus.id)
     if (!target) return
 
+    // A comment focus request targets source lines: Source before restoring the range.
+    if (mode() !== "source") selectMode("source")
     commentsUi.note.openComment(target.id, target.selection, { cancelDraft: true })
     requestAnimationFrame(() => comments.clearFocus())
   })
@@ -754,6 +1173,10 @@ function SessionFileViewV2(props: { tab: string }) {
         }}
         onLineSelectionEnd={(range: SelectedLineRange | null) => {
           if (!range) {
+            // A hidden source cannot legitimately end a selection; dropping the null here
+            // keeps mode switches from clearing selections or drafts. Visible nulls keep
+            // the V2 controller's clear-selection-and-draft semantics.
+            if (mode() !== "source") return
             commentsUi.note.select(null)
             commentsUi.note.cancelDraft()
             return
@@ -782,17 +1205,55 @@ function SessionFileViewV2(props: { tab: string }) {
     </div>
   )
 
+  const sourceVisible = () => mode() === "source" || !state()?.loaded
+  const oversized = () =>
+    previewEligiblePath(path()) && state()?.content?.type === "text" && isPreviewSourceTooLarge(contents())
+
   const content = () => (
-    <div class="mt-3 relative h-full min-h-0">
-      <ScrollView class="h-full" viewportRef={scrollSync.setViewport} onScroll={scrollSync.handleScroll as any}>
-        <Switch>
-          <Match when={state()?.loaded}>{renderFile(contents())}</Match>
-          <Match when={state()?.loading}>
-            <div class="px-6 py-4 text-text-weak">{language.t("common.loading")}...</div>
-          </Match>
-          <Match when={state()?.error}>{(err) => <div class="px-6 py-4 text-text-weak">{err()}</div>}</Match>
-        </Switch>
-      </ScrollView>
+    <div class="mt-3 relative h-full min-h-0 flex flex-col">
+      <Show when={previewReady()}>
+        <PreviewSourceControls
+          mode={mode()}
+          groupLabel={language.t("filePreview.mode.group")}
+          previewLabel={language.t("filePreview.mode.preview")}
+          sourceLabel={language.t("filePreview.mode.source")}
+          onSelect={selectMode}
+        />
+      </Show>
+      <Show when={oversized()}>
+        <div data-file-preview-too-large class="px-4 pt-2 text-text-weak">
+          {language.t("filePreview.tooLarge", { size: "5 MiB" })}
+        </div>
+      </Show>
+      <div class="relative flex-1 min-h-0">
+        <Show when={sourceMounted() || !state()?.loaded}>
+          <div data-slot="file-source-pane" class="h-full" style={{ display: sourceVisible() ? "" : "none" }}>
+            <ScrollView class="h-full" viewportRef={scrollSync.setViewport} onScroll={scrollSync.handleScroll as any}>
+              <Switch>
+                <Match when={state()?.loaded}>{renderFile(contents())}</Match>
+                <Match when={state()?.loading}>
+                  <div class="px-6 py-4 text-text-weak">{language.t("common.loading")}...</div>
+                </Match>
+                <Match when={state()?.error}>{(err) => <div class="px-6 py-4 text-text-weak">{err()}</div>}</Match>
+              </Switch>
+            </ScrollView>
+          </div>
+        </Show>
+        <Show when={previewReady() && mode() === "preview" && state()?.loaded}>
+          <FilePreview
+            class="h-full overflow-y-auto"
+            path={path() ?? ""}
+            source={contents()}
+            directory={sdk().directory}
+            owner={sessionKey()}
+            anchor={previewAnchor() ?? null}
+            initialScroll={previewState.scroll(props.tab) ?? null}
+            onScrollChange={(pos) => previewState.setScroll(props.tab, pos)}
+            onRequestNavigate={openPreviewTarget}
+            onRequestSource={() => selectMode("source")}
+          />
+        </Show>
+      </div>
     </div>
   )
 

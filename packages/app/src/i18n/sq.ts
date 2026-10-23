@@ -1160,4 +1160,11 @@ export const dict = {
   "workspace.reset.archived.many": "Seancat {{count}} do të arkivohen.",
   "workspace.reset.note": "Kjo do të rivendosë hapësirën e punës që të përputhet me degën e paracaktuar.",
   "dialog.usageExceeded.dontShowAgain": "Mos e shfaq përsëri",
+  "filePreview.tooLarge": "This file is larger than {{size}} and cannot be previewed.",
+  "filePreview.resource.unavailable": "Image unavailable",
+  "filePreview.error": "This preview could not be rendered.",
+  "filePreview.error.viewSource": "View source",
+  "filePreview.mode.group": "File view",
+  "filePreview.mode.preview": "Preview",
+  "filePreview.mode.source": "Source",
 }
