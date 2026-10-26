@@ -51,5 +51,5 @@ handovers/
 /packages/app/e2e/file-preview-results/
 
 # Private project context
-/workspace/
+/workspace
 /handover.md
